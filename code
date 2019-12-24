@@ -1,0 +1,490 @@
+#include <avr/io.h>
+#define F_CPU 16000000UL
+#include <util/delay.h>
+#include <avr/interrupt.h>
+
+#define lcd PORTC
+// [rs, rw, en,-, 4, 5, 6, 7]
+int i=0,j=0,dir_loop;
+int flag=1;	// 0 for manual, 1 automatic
+int flag_rot=0;
+long int sleep =0;
+
+/* LCD COMMANDS LIST
+
+	01	Clear display screen
+	02	Return home
+	04	Decrement cursor (shift cursor to left)
+	06	Increment cursor (shift cursor to right)
+	05	Shift display right
+	07	Shift display left
+	08	Display off, cursor off
+	0A	Display off, cursor on
+	0C	Display on, cursor off
+	0E	Display on, cursor blinking
+	0F	Display on, cursor blinking
+	10	Shift cursor position to left
+	14	Shift cursor position to right
+	18	Shift the entire display to the left
+	1C	Shift the entire display to the right
+	80	Force cursor to beginning ( 1st line)
+	C0	Force cursor to beginning ( 2nd line)
+	38	2 lines and 5×7 matrix
+	90  Force cursor to beginning to 3rd line
+	D0	Force cursor to beginning to 4th line
+	38	2 lines and 5×7 matrix (8-bit mode)
+	28	2 lines and 5×7 matrix (4-bit mode)
+
+*/
+
+void lcd_command(unsigned char cmd)                     //FUNCTION TO CHANGE CURSOR
+{
+	lcd=(cmd&0xF0);
+	lcd|=0b00000100;
+	_delay_ms(10);
+	lcd&=0xF0;						// enable high to low
+	_delay_ms(10);
+	lcd=(cmd<<4)&0xF0;				// first higher send, then lower
+	lcd|=0b00000100;
+	_delay_ms(10);
+	lcd&=0xF0;
+	_delay_ms(10);
+}
+void lcd_write(unsigned char data)						//FUNCTION TO WRITE CHARACTER
+{
+	lcd=(data&0xF0);
+	lcd|=0b00000101;
+	_delay_ms(10);
+	lcd&=0xF1;			//  Enable from high to low
+	_delay_ms(10);
+	lcd=(data<<4)&0xF0;		// next 4 data-bit 
+	lcd|=0b00000101;
+	_delay_ms(10);
+	lcd&=0xF1;
+	_delay_ms(10);
+	
+}
+
+void lcd_init()
+{
+	lcd_command(0x02);		//  Return home
+	lcd_command(0x28);		//  4-bit mode
+	lcd_command(0x06);		// 	Increment cursor (shift cursor to right)
+	lcd_command(0x0c);		// 	Display on, cursor off
+}
+
+void lcd_string(const char str[])							//FUNCTION TO WRITE STRING
+{
+	int i=0;
+	while(str[i]!='\0')
+	{
+		lcd_write(str[i]);
+		i++;
+	}
+}
+
+void lcd_int(int a)
+{
+	int s[10],b=0,count=0;
+	while(a>0)
+	{
+		b=a%10;
+		s[count]=b;
+		a=a/10;
+		count++;		
+	}
+	count--;
+	while(count>=0)
+	{
+		lcd_write(48+s[count]);			// ASCII VALUE
+		count--;
+	}
+}
+
+
+void lcd_float(float n,int count)
+{
+	int a=1,i=0,b=0,s[10];
+	int flag=0;
+	long int no;
+	
+	while(a<=count)
+	{	n=n*10;			// to convert 12.3456 -> 123456
+		a++;
+		
+	}
+	no=n;		// just assign the number to long integer after multiply by 10^n
+	i=0;
+	
+	while(no>0)
+	{
+		b=no%10;
+		s[i]=b;
+		no=no/10;
+		i++;
+	}
+	
+	i--;
+	while(i>=0)
+	{
+		
+		if((i==(count-1))&& flag==0)
+		{	lcd_write(46);		// To print dot(.)
+			flag=1;
+		}
+		else
+		{	lcd_write(48+s[i]);
+			i--;
+		}
+	}
+	
+}
+
+
+void adc_init()
+{
+	ADMUX=(1<<REFS0);	// Aref=AVcc
+	ADCSRA=(1<<ADEN)|(1<<ADPS2)|(1<<ADPS1)|(1<<ADPS0);     // Enable ADC also set Prescaler as 128
+}
+
+unsigned int ADC_read(unsigned char chnl)
+{
+	chnl= chnl & 0b00000101; // select adc channel between 0 to 5
+	ADMUX = (ADMUX & 0xF8)|chnl;     // clears the bottom 3 bits before ORing
+	ADCSRA|=(1<<ADSC);   // start conversion
+	while(!(ADCSRA & (1<<ADIF)));   // wait for ADIF conversion complete return
+	ADCSRA|=(1<<ADIF);   // clear ADIF when conversion complete by writing 1
+	return (ADC); //return calculated ADC value
+}
+
+
+void pwm_init()
+{
+   TCCR0|=(1<<WGM00)|(1<<WGM01)|(1<<COM01)|(1<<CS02); //|(1<<CS00);	// |(1<<CS00)
+   DDRB|=(1<<PB3);		// OC0 as output
+   
+   TCCR2|=(1<<WGM20)|(1<<WGM21)|(1<<COM21)|(1<<CS22); //|(1<<CS20);	// |(1<<CS20)
+   DDRD|=(1<<PD7);		// OC2 as output
+   
+   TCNT1 = 0;		/* Set timer1 count zero */
+   ICR1 = 4999;		/* Set TOP count for timer1 in ICR1 register ; 50Hz=16MHz/(x*64)=> x=5000	*/
+      
+   /* Set Fast PWM, TOP in ICR1, Clear OC1A on compare match, clk/64 */
+   TCCR1A = (1<<WGM11)|(1<<COM1A1);
+   TCCR1B = (1<<WGM12)|(1<<WGM13)|(1<<CS10)|(1<<CS11);
+   DDRD |= (1<<PD5);	/* Make OC1A pin as output */
+  
+}
+
+void setpwm_0(uint8_t duty)
+{
+   OCR0=duty;		//  duty= 0-255
+}
+
+void setpwm_2(uint8_t duty)
+{
+	OCR2=duty;		//  duty= 0-255
+	OCR1B=duty;
+}
+
+void fan_rotate()
+{
+	// dir_loop from 0-500 for 0-180 degree
+	
+	for(dir_loop=0;dir_loop<500;dir_loop=dir_loop+10)
+	{
+		OCR1A = dir_loop;	/* Set servo shaft at -90° position */
+		_delay_ms(20);
+	}
+	_delay_ms(2000);
+	for( ; dir_loop>0; dir_loop=dir_loop-10)
+	{
+		OCR1A = dir_loop;	/* Set servo shaft at -90° position */
+		_delay_ms(20);
+	}
+	
+}
+
+
+void LCD_Custom_Char (unsigned char loc, unsigned char *msg)
+{
+	unsigned char i;
+	if(loc<8)
+	{
+		lcd_command(0x40 + (loc*8));	/* Command 0x40 and onwards forces the device to point CGRAM address */
+		for(i=0;i<8;i++)	/* Write 8 byte for generation of 1 character */
+		lcd_write(msg[i]);
+	}
+}
+
+void lcd_custom()
+{
+	unsigned char Character1[8] = { 0x0A, 0x0A, 0x1F, 0x11, 0x11, 0x0E, 0x04, 0x04 };		// plug in
+	unsigned char Character2[8] = { 0x00, 0x00, 0x0A, 0x00, 0x04, 0x11, 0x0E, 0x00 };		// smile
+	unsigned char Character3[8] = { 0x00,0x11 ,0x0A ,0x04 ,0x04 ,0x08 ,0x00 ,0x00 };		// fan
+	unsigned char Character4[8] = { 0x0E, 0x1F, 0x11, 0x11, 0x11,0x1F,0x1F,0x1F };		// Battery	level 1
+	unsigned char Character5[8] = { 0x0E, 0x1F, 0x11, 0x11, 0x1F,0x1F,0x1F,0x1F };		// Battery	2
+	unsigned char Character6[8] = { 0x0E, 0x1F, 0x11, 0x1F, 0x1F,0x1F,0x1F,0x1F };		// Battery	3
+	unsigned char Character7[8] = { 0x0E, 0x1F, 0x1F, 0x1F, 0x1F,0x1F,0x1F,0x1F };		// Battery	4
+	//unsigned char Character8[8] = { 0x04,0x0E ,0x1B ,0x11 ,0x11 ,0x0E ,0x0E ,0x00 };		// bulb
+	
+	LCD_Custom_Char(0, Character1);  /* Build Character1 at position 0 */ // store in CGRAM
+	LCD_Custom_Char(1, Character2);  /* Build Character2 at position 1 */
+	LCD_Custom_Char(2, Character3);		// battery indicator
+	LCD_Custom_Char(3, Character4);
+	LCD_Custom_Char(4, Character5);
+	LCD_Custom_Char(5, Character6);
+	LCD_Custom_Char(6, Character7);
+	//LCD_Custom_Char(7, Character8);
+	lcd_command(0x01);
+
+}
+
+
+
+ISR(INT0_vect)
+{
+	lcd_command(0x01);
+	lcd_command(0x80);
+	if(flag==0)	
+			{ flag=1; lcd_string("AUTOMATIC MODE ");	}
+	else { flag=0; lcd_string("  MANUAL MODE  "); }
+	_delay_ms(1000);
+	lcd_command(0x01);	
+	lcd_command(0x80);
+		
+	PORTA&=~(1<<7);	// Backlight ON
+	lcd_init();
+	sleep=0;
+}
+
+
+ISR(INT1_vect)
+{
+	if(flag_rot==0)
+	{ flag_rot=1; }
+	else { flag_rot=0; }
+	sleep=0;
+	_delay_ms(200);
+}
+
+// MAIN CODE STARTS HERE
+
+//
+/*
+A0,A1,A2 A3 -> POT1 POT2 LDR Current_sensor
+B3 D7  -> PWM output to bulb and Fan
+D5  ->  SERVO for rotation
+PORT C -> LCD
+INT0,1 -> D2(Auto-manual) D3(fan rotation control)
+Buzzer	-> B0
+A7	-> Backlight
+
+*/
+
+int main(void)
+{
+	DDRB|=(1<<0);		// buzzer
+	DDRC = 0xFF;
+	DDRD &=~(1<<2);		// INT 0	mode
+	DDRD &=~(1<<3);		// INT 1  rotation
+	DDRA|=(1<<7);
+	PORTA&=~(1<<7);		// ON for Backlight
+	int del=50;
+	int fan = 0; // define an integer to save adc read value A0
+	int bulb=0;	// A1
+	int ldr =0;
+	int curr_in=0;
+	float curr_f=0,curr=0;
+	int flag_light=0;
+	int mode_fan=0;
+	int mode_bulb=0;
+	
+	GICR = (1<<INT0)|(1<<INT1);		/* Enable INT0*/
+	MCUCR = 0x0F; /*	 if 0x0B 
+							   1011
+						10 INT1 on falling edge 
+						11 Trigger INT0 on rising edge */
+	
+	sei();			/* Enable Global Interrupt */
+	
+	adc_init();
+	pwm_init();		// initialize both pwm0 and pwm2
+	lcd_init();
+	lcd_custom();
+	lcd_command(0x01);	
+	lcd_string("BOMBERMEN SYSTEM");
+//	PORTB|=(1<<0);			Buzzer start
+	_delay_ms(5000);
+	PORTB&=~(1<<0);
+	lcd_command(0x01);		// LCD clear
+	float power=0;
+	while (1)
+	{
+		PORTA^=(1<<6);
+// 		curr_in=ADC_read(3);
+// 		curr=float(curr_in)*5/1023;
+// 		curr_f= (curr-2.5)/0.065;			// 2.5 is offset and 65mV/A is sensitivity for 30A ACS712
+// 		power=curr*10;
+		if(flag==0)
+	{
+		sleep=sleep+2;
+		
+		lcd_command(0x80);
+		fan = ADC_read(0);   //save adc read value from A0 in integer
+		bulb= ADC_read(1);		// A1
+		
+		lcd_string("FAN-");
+		lcd_command(0xc0);		// 2nd line		
+		lcd_string("BULB-");						
+		lcd_command(0x84);
+		
+		if(fan<30)	{   
+						if(mode_fan!=0)
+							sleep=0;
+						setpwm_0(0);  
+						lcd_string("0  ");
+						_delay_ms(del);
+						mode_fan=0;
+						}
+		else if(fan<400)	{	
+								if(mode_fan!=1)
+								sleep=0;
+								setpwm_0(90);
+								lcd_string("1  ");
+								_delay_ms(del);
+								mode_fan=1;
+				    	}
+		else if(fan<900){	
+							if(mode_fan!=2)
+							sleep=0;
+			
+							setpwm_0(170);
+							lcd_string("2  "); 
+							_delay_ms(del);
+							mode_fan=2;
+						  }
+		else 	{	
+					if(mode_fan!=3)
+					sleep=0;
+					setpwm_0(255);		
+					lcd_string("3  ");
+					_delay_ms(del);	
+					mode_fan=3;
+					}	
+	//	lcd_string("         ");		// bcz interrupt can call any time,
+							// so even after clear at end of ISR Available and Gone may print
+		lcd_int(sleep);		
+//  		lcd_int(curr_in);	  // current sensor
+// 		 lcd_string(" ");
+// 	    lcd_float(curr,3);	
+			
+		lcd_command(0xc5);		// level pos on line 2
+			
+		if(bulb>950) 	{	
+							if(mode_bulb!=0)
+							sleep=0;
+							setpwm_2(0);	// PORTD&=~(1<<7);
+							lcd_string("0  "); 
+							 _delay_ms(del);
+							 mode_bulb=0;	}
+				
+		else if(bulb>600)					// Opposite of fan to make pot direction same as per hardware
+					{	
+						if(mode_bulb!=1)
+						sleep=0;
+						setpwm_2(20);
+						lcd_string("1  ");	
+						 _delay_ms(del);
+						 mode_bulb=1;	}
+		else if(bulb>300)	{	
+								if(mode_bulb!=2)
+								sleep=0;
+								setpwm_2(90);
+								lcd_string("2  ");	
+								 _delay_ms(del);
+								 mode_bulb=2;	}
+		else				{	
+								if(mode_bulb!=3)
+								sleep=0;
+								setpwm_2(255);
+								lcd_string("3  ");
+								 _delay_ms(del);
+								 mode_bulb=3;	}
+		
+		// lcd_command(0x01);	// removed bcz down there fan rotate delay is large and no display for that time
+		}
+		
+  if(flag==1)
+	{
+		sleep++;
+		
+		lcd_command(0x80);
+		ldr=ADC_read(2);
+		
+		if(ldr<800)	
+				{	lcd_string("LIGHT ON"); 
+					setpwm_2(0);
+					setpwm_0(0);
+					if(flag_light==0)
+						{
+							sleep=0;
+						}
+					flag_light=1;
+				   }
+		else	{	
+							if(flag_light==1)
+						{
+							sleep=0;
+							PORTB|=(1<<0);
+							_delay_ms(1000);
+							PORTB&=~(1<<0);
+							}
+					flag_light=0;
+					lcd_string("LIGHT GONE   ");	// otherwise light available residual also print
+					setpwm_2(255);
+					setpwm_0(255);
+					}
+					
+		lcd_string(" ");
+		lcd_int(sleep);
+		
+		lcd_command(0xc0);
+		
+		
+// 		lcd_string("     ");	// display in center
+// 		lcd_int(ldr);	lcd_string(" "); 			// so that 1023's 3 don't appear in 3 digit reading
+// 		_delay_ms(100);	
+		
+		// lcd_command(0x01);
+				
+	  }
+	  
+	 lcd_string("  "); 
+	 lcd_write(4);
+	  
+	  
+	if(flag_rot==0)
+	{
+		lcd_string("   S");			// fan rotation status
+		_delay_ms(1000);
+	}  
+	else
+		{
+			  lcd_string("   R");
+			  fan_rotate();		// SET SOME CONDITION don't write up bcz then delay in displaying speed
+			  sleep+=1;
+		}
+	
+
+	if(sleep>=15)
+	{
+		PORTA|=(1<<7);	// Backlight OFF
+		lcd_command(0x08);
+	}
+	  
+	   
+	  lcd_command(0x01);
+	}
+
+}
